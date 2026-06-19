@@ -4,9 +4,9 @@
  * MCPico — MCP proxy that bundles flat tool lists into hierarchical subcommand groups.
  *
  * Usage:
- *   mcplico [--config <path>]
+ *   mcpico [--config <path>]
  *
- * Configuration is read from mcplico.json in the current directory by default.
+ * Configuration is read from mcpico.json in the current directory by default.
  */
 
 import { readFileSync } from "node:fs";
@@ -17,7 +17,7 @@ import type { MCPicoConfig } from "./config.js";
 async function main(): Promise<void> {
   // Parse CLI args
   const args = process.argv.slice(2);
-  let configPath = "mcplico.json";
+  let configPath = "mcpico.json";
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--config" || args[i] === "-c") {
@@ -31,14 +31,14 @@ async function main(): Promise<void> {
 MCPico — MCP proxy that bundles flat tool lists into hierarchical subcommand groups.
 
 Usage:
-  mcplico [--config <path>]
+  mcpico [--config <path>]
 
 Options:
-  --config, -c <path>    Path to config file (default: mcplico.json)
+  --config, -c <path>    Path to config file (default: mcpico.json)
   --version, -v          Show version
   --help, -h             Show this help
 
-Config file format (mcplico.json):
+Config file format (mcpico.json):
   {
     "servers": [
       {

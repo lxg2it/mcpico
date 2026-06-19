@@ -19,17 +19,26 @@ Group related tools under a single entry point. The model sees 9 groups instead 
   14 tools → 9 groups: read, write, edit, create, list, directory, move, search, get
 ```
 
+## Features
+
+- **Tool bundling** — Groups tools by prefix (configurable separator), collapsing flat tool lists
+- **Auto-generated help** — Each group's `help` subcommand is built from upstream tool schemas
+- **Multi-server aggregation** — Proxy multiple upstream MCP servers through one interface
+- **Dual transport** — Supports both stdio and Streamable HTTP (SSE) upstream servers
+- **Configurable timeouts** — Per-server connection timeout with sensible default (30s)
+- **Resource & prompt passthrough** — Namespaced to avoid collisions across servers
+
 ## Usage
 
 ### Install
 
 ```bash
-npm install -g mcplico
+npm install -g mcpico
 ```
 
 ### Configure
 
-Create `mcplico.json`:
+Create `mcpico.json`:
 
 ```json
 {
@@ -49,7 +58,7 @@ Create `mcplico.json`:
 ### Run
 
 ```bash
-mcplico
+mcpico
 ```
 
 ### Connect your MCP client
@@ -59,9 +68,9 @@ Add MCPico as a server in your MCP client config:
 ```json
 {
   "mcpServers": {
-    "mcplico": {
-      "command": "mcplico",
-      "args": ["--config", "/path/to/mcplico.json"]
+    "mcpico": {
+      "command": "mcpico",
+      "args": ["--config", "/path/to/mcpico.json"]
     }
   }
 }
@@ -106,9 +115,8 @@ MCPico can proxy multiple upstream servers simultaneously:
     {
       "name": "github",
       "transport": {
-        "type": "stdio",
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-github"]
+        "type": "sse",
+        "url": "https://mcp-github.example.com/mcp"
       }
     }
   ]
@@ -131,6 +139,7 @@ Groups from different servers are merged if they share a prefix. Otherwise each 
 |-------|------|----------|-------------|
 | `name` | `string` | yes | Friendly name / group namespace |
 | `transport` | `TransportConfig` | yes | How to connect to the upstream server |
+| `connectTimeoutMs` | `number` | no | Connection timeout in ms (default: 30000) |
 
 ### TransportConfig (stdio)
 
@@ -141,6 +150,22 @@ Groups from different servers are merged if they share a prefix. Otherwise each 
 | `args` | `string[]` | no | Command-line arguments |
 | `env` | `object` | no | Environment variables |
 | `cwd` | `string` | no | Working directory |
+
+### TransportConfig (SSE / Streamable HTTP)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | `"sse"` | yes | Transport type |
+| `url` | `string` | yes | Full URL to MCP Streamable HTTP endpoint |
+
+## Development
+
+```bash
+npm install
+npm run build    # TypeScript compilation
+npm test         # Run tests (77 tests, vitest)
+npm run dev      # Run directly with tsx
+```
 
 ## License
 

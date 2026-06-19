@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { TransportConfig } from "./config.js";
 
 /**
@@ -39,29 +40,47 @@ export interface DiscoveredServer {
   resources: UpstreamResource[];
   prompts: UpstreamPrompt[];
   client: Client;
-  transport: StdioClientTransport;
 }
 
 /**
  * Connect to an upstream MCP server and discover its tools.
+ *
+ * Supports stdio and streamable HTTP transports.
+ * Default connection timeout is 30 seconds.
  */
 export async function discoverServer(
   name: string,
-  transportConfig: TransportConfig
+  transportConfig: TransportConfig,
+  connectTimeoutMs: number = 30_000
 ): Promise<DiscoveredServer> {
-  const transport = new StdioClientTransport({
-    command: transportConfig.type === "stdio" ? transportConfig.command : "",
-    args: transportConfig.type === "stdio" ? transportConfig.args : [],
-    env: transportConfig.type === "stdio" ? transportConfig.env : undefined,
-    cwd: transportConfig.type === "stdio" ? transportConfig.cwd : undefined,
-  });
+  let transport;
+
+  if (transportConfig.type === "stdio") {
+    transport = new StdioClientTransport({
+      command: transportConfig.command,
+      args: transportConfig.args,
+      env: transportConfig.env,
+      cwd: transportConfig.cwd,
+    });
+  } else if (transportConfig.type === "sse") {
+    transport = new StreamableHTTPClientTransport(
+      new URL(transportConfig.url)
+    );
+  } else {
+    throw new Error(`Unsupported transport type: ${(transportConfig as TransportConfig).type}`);
+  }
 
   const client = new Client(
     { name: `MCPico-${name}`, version: "0.1.0" },
     { capabilities: {} }
   );
 
-  await client.connect(transport);
+  // Connect with timeout
+  await withTimeout(
+    client.connect(transport),
+    connectTimeoutMs,
+    `Connection to "${name}" timed out after ${connectTimeoutMs}ms`
+  );
 
   // Discover tools
   const toolsResult = await client.listTools();
@@ -102,7 +121,7 @@ export async function discoverServer(
     // Prompts may not be supported by this server
   }
 
-  return { name, tools, resources, prompts, client, transport };
+  return { name, tools, resources, prompts, client };
 }
 
 /**
@@ -110,4 +129,20 @@ export async function discoverServer(
  */
 export async function disconnectServer(server: DiscoveredServer): Promise<void> {
   await server.client.close();
+}
+
+/**
+ * Race a promise against a timeout.
+ */
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  errorMessage: string
+): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(errorMessage)), timeoutMs)
+    ),
+  ]);
 }

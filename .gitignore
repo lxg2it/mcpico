@@ -1,5 +1,7 @@
 node_modules/
 dist/
+coverage/
 *.log
 .DS_Store
-mcplico.json
+.env
+mcpico.json
