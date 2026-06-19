@@ -24,6 +24,14 @@
     "subcommand"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lxg2it/mcpico"
+  },
+  "homepage": "https://github.com/lxg2it/mcpico#readme",
+  "bugs": {
+    "url": "https://github.com/lxg2it/mcpico/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0"
   },
