@@ -35,6 +35,13 @@ export interface GroupOverrides {
 }
 
 /**
+ * Transport to expose MCPico itself to clients.
+ */
+export type ListenConfig =
+  | { type: "stdio" }
+  | { type: "sse"; port: number; host?: string };
+
+/**
  * Full MCPico configuration.
  */
 export interface MCPicoConfig {
@@ -44,6 +51,8 @@ export interface MCPicoConfig {
   separator?: string;
   /** Explicit group overrides — tools not listed here are auto-grouped */
   groups?: GroupOverrides;
+  /** How MCPico exposes itself to clients (default: stdio) */
+  listen?: ListenConfig;
 }
 
 /**

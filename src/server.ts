@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createServer } from "node:http";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod/v4";
 import type { MCPicoConfig } from "./config.js";
@@ -15,10 +17,119 @@ import { generateHelpText } from "./help.js";
 import { forwardToolCall } from "./proxy.js";
 
 /** Helper: create a simple text content result */
-function textResult(text: string): CallToolResult {
+export function textResult(text: string): CallToolResult {
   return {
     content: [{ type: "text" as const, text }],
   };
+}
+
+/**
+ * Merge tool groups from multiple upstream servers.
+ *
+ * Groups with the same name are merged:
+ * - Tools are concatenated
+ * - serverName is joined with " + "
+ */
+export function mergeGroups(allGroups: ToolGroup[]): Map<string, ToolGroup> {
+  const mergedGroups = new Map<string, ToolGroup>();
+  for (const group of allGroups) {
+    const existing = mergedGroups.get(group.groupName);
+    if (existing) {
+      existing.tools.push(...group.tools);
+      if (!existing.serverName.includes(group.serverName)) {
+        existing.serverName += ` + ${group.serverName}`;
+      }
+    } else {
+      mergedGroups.set(group.groupName, { ...group });
+    }
+  }
+  return mergedGroups;
+}
+
+/**
+ * Handle a tool call command for a given group.
+ *
+ * Dispatches: help → error → unknown subcommand → forward to upstream server.
+ *
+ * Exported for testing; allows injecting a mock forwardFn to avoid
+ * connecting to real upstream servers.
+ */
+export async function handleToolCall(
+  command: string,
+  group: ToolGroup,
+  servers: DiscoveredServer[],
+  helpText: string,
+  forwardFn: (
+    server: DiscoveredServer,
+    toolName: string,
+    args: Record<string, unknown>
+  ) => Promise<CallToolResult> = forwardToolCall
+): Promise<CallToolResult> {
+  const parsed = parseCommand(command);
+
+  if (parsed.isHelp) {
+    return textResult(helpText);
+  }
+
+  if (parsed.error) {
+    return textResult(parsed.error);
+  }
+
+  const toolName = parsed.subcommand!;
+  const upstreamTool = group.tools.find((t) => t.name === toolName);
+  if (!upstreamTool) {
+    const available = group.tools.map((t) => t.name).join(", ");
+    return textResult(
+      `Unknown subcommand: "${toolName}"\n\nAvailable in ${group.groupName}: ${available}\n\nUse 'help' for full documentation.`
+    );
+  }
+
+  const serverForTool = servers.find((s) =>
+    s.tools.some((t) => t.name === toolName)
+  );
+
+  if (!serverForTool) {
+    return textResult(
+      `Internal error: could not find upstream server for tool "${toolName}"`
+    );
+  }
+
+  try {
+    const result = await forwardFn(serverForTool, toolName, parsed.args);
+    return result;
+  } catch (err) {
+    return textResult(
+      `Error calling "${toolName}": ${(err as Error).message}`
+    );
+  }
+}
+
+/**
+ * Build the description string for a tool group.
+ */
+export function buildGroupDescription(group: ToolGroup): string {
+  const toolCount = group.tools.length;
+  return [
+    `MCPico ${group.groupName} — ${toolCount} tool${toolCount === 1 ? "" : "s"}`,
+    `Source: ${group.serverName}`,
+    `Use 'help' to see all subcommands and their parameters.`,
+    `Format: <subcommand> {"key":"value",...}`,
+  ].join(" | ");
+}
+
+/**
+ * Validate all server configs, returning an array of error messages.
+ * Returns empty array if all configs are valid.
+ */
+export function validateAllServerConfigs(servers: MCPicoConfig["servers"]): string[] {
+  const errors: string[] = [];
+  for (const serverConfig of servers) {
+    const err = validateServerConfig(serverConfig);
+    if (err) {
+      errors.push(err);
+    }
+  }
+  return errors;
 }
 
 /**
@@ -36,13 +147,7 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
   const allGroups: ToolGroup[] = [];
 
   // Validate server configs
-  const validationErrors: string[] = [];
-  for (const serverConfig of config.servers) {
-    const err = validateServerConfig(serverConfig);
-    if (err) {
-      validationErrors.push(err);
-    }
-  }
+  const validationErrors = validateAllServerConfigs(config.servers);
   if (validationErrors.length > 0) {
     console.error("Configuration errors:");
     for (const err of validationErrors) {
@@ -96,18 +201,7 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
   }
 
   // Build lookup: groupName → ToolGroup (merged across servers)
-  const mergedGroups = new Map<string, ToolGroup>();
-  for (const group of allGroups) {
-    const existing = mergedGroups.get(group.groupName);
-    if (existing) {
-      existing.tools.push(...group.tools);
-      if (!existing.serverName.includes(group.serverName)) {
-        existing.serverName += ` + ${group.serverName}`;
-      }
-    } else {
-      mergedGroups.set(group.groupName, { ...group });
-    }
-  }
+  const mergedGroups = mergeGroups(allGroups);
 
   // Create the MCPico server
   const server = new McpServer(
@@ -124,12 +218,7 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
   // Register each group as a tool
   for (const [groupName, group] of mergedGroups) {
     const toolCount = group.tools.length;
-    const description = [
-      `MCPico ${groupName} — ${toolCount} tool${toolCount === 1 ? "" : "s"}`,
-      `Source: ${group.serverName}`,
-      `Use 'help' to see all subcommands and their parameters.`,
-      `Format: <subcommand> {"key":"value",...}`,
-    ].join(" | ");
+    const description = buildGroupDescription(group);
 
     const helpText = generateHelpText(group);
 
@@ -148,47 +237,7 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
         },
       },
       async (args: { command: string }) => {
-        const parsed = parseCommand(args.command);
-
-        if (parsed.isHelp) {
-          return textResult(helpText);
-        }
-
-        if (parsed.error) {
-          return textResult(parsed.error);
-        }
-
-        const toolName = parsed.subcommand!;
-        const upstreamTool = group.tools.find((t) => t.name === toolName);
-        if (!upstreamTool) {
-          const available = group.tools.map((t) => t.name).join(", ");
-          return textResult(
-            `Unknown subcommand: "${toolName}"\n\nAvailable in ${groupName}: ${available}\n\nUse 'help' for full documentation.`
-          );
-        }
-
-        const serverForTool = servers.find((s) =>
-          s.tools.some((t) => t.name === toolName)
-        );
-
-        if (!serverForTool) {
-          return textResult(
-            `Internal error: could not find upstream server for tool "${toolName}"`
-          );
-        }
-
-        try {
-          const result = await forwardToolCall(
-            serverForTool,
-            toolName,
-            parsed.args
-          );
-          return result;
-        } catch (err) {
-          return textResult(
-            `Error calling "${toolName}": ${(err as Error).message}`
-          );
-        }
+        return handleToolCall(args.command, group, servers, helpText);
       }
     );
 
@@ -273,13 +322,33 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
     console.error(`  Registered ${promptCount} prompt(s)`);
   }
 
-  // Connect to client via stdio
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  // Connect to client via configured transport
+  const listenConfig = config.listen || { type: "stdio" };
 
-  console.error(
-    `MCPico ready — ${mergedGroups.size} group(s), ${servers.length} upstream server(s)`
-  );
+  if (listenConfig.type === "sse") {
+    const transport = new StreamableHTTPServerTransport();
+    const httpServer = createServer(async (req, res) => {
+      // Collect body for handleRequest
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(chunk);
+      }
+      const body = chunks.length > 0 ? Buffer.concat(chunks).toString() : undefined;
+      await transport.handleRequest(req, res, body);
+    });
+    await server.connect(transport);
+    const host = listenConfig.host || "localhost";
+    httpServer.listen(listenConfig.port, host);
+    console.error(
+      `MCPico ready — ${mergedGroups.size} group(s), ${servers.length} upstream server(s) — listening on http://${host}:${listenConfig.port}`
+    );
+  } else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error(
+      `MCPico ready — ${mergedGroups.size} group(s), ${servers.length} upstream server(s)`
+    );
+  }
 
   // Handle shutdown
   let shuttingDown = false;

@@ -194,4 +194,44 @@ describe("generateHelpText", () => {
     expect(text).toContain(tool.name);
     // Should not crash
   });
+
+  it("handles non-standard property types gracefully", () => {
+    const tool = makeTool({
+      inputSchema: {
+        type: "object",
+        properties: {
+          weird: { type: null, description: "Unknown type" },
+        },
+        required: ["weird"],
+      },
+    });
+    const text = generateHelpText(makeGroup({ tools: [tool] }));
+    // Should not crash — fallback to "any"
+    expect(text).toContain("(any");
+  });
+
+  it("falls back to bare subcommand for very long examples", () => {
+    // Three required params with long names → JSON.stringify > 80 chars
+    const tool = makeTool({
+      name: "do_something",
+      inputSchema: {
+        type: "object",
+        properties: {
+          configuration_file_path: { type: "string", description: "Long param" },
+          output_destination_directory: { type: "string", description: "Another long one" },
+          encryption_algorithm_identifier: { type: "string", description: "Third long one" },
+        },
+        required: [
+          "configuration_file_path",
+          "output_destination_directory",
+          "encryption_algorithm_identifier",
+        ],
+      },
+    });
+    const text = generateHelpText(makeGroup({ tools: [tool] }));
+    // Example should just be the bare subcommand name (long args overflow)
+    // (param names appear in Parameters section too, so just check the Example line)
+    const exampleLine = text.split("\n").find((l) => l.trim().startsWith("Example:"));
+    expect(exampleLine).toBe("    Example: do_something");
+  });
 });

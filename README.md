@@ -24,7 +24,8 @@ Group related tools under a single entry point. The model sees 9 groups instead 
 - **Tool bundling** — Groups tools by prefix (configurable separator), collapsing flat tool lists
 - **Auto-generated help** — Each group's `help` subcommand is built from upstream tool schemas
 - **Multi-server aggregation** — Proxy multiple upstream MCP servers through one interface
-- **Dual transport** — Supports both stdio and Streamable HTTP (SSE) upstream servers
+- **Dual upstream transport** — Supports both stdio and Streamable HTTP (SSE) upstream servers
+- **Dual listen transport** — MCPico itself listens via stdio or HTTP/SSE (configurable port)
 - **Configurable timeouts** — Per-server connection timeout with sensible default (30s)
 - **Resource & prompt passthrough** — Namespaced to avoid collisions across servers
 
@@ -132,6 +133,25 @@ Groups from different servers are merged if they share a prefix. Otherwise each 
 | `servers` | `ServerConfig[]` | **required** | Upstream MCP servers to proxy |
 | `separator` | `string` | `"_"` | Separator for prefix-based tool grouping |
 | `groups` | `object` | `{}` | Explicit group overrides (`{ "group": ["tool1","tool2"] }`) |
+| `listen` | `ListenConfig` | `{"type":"stdio"}` | How MCPico exposes itself to MCP clients |
+
+### ListenConfig
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | `"stdio"` | yes | Standard stdio transport |
+| `type` | `"sse"` | yes | HTTP/SSE — specify `port` and optional `host` |
+
+```json
+// SSE listen mode — MCPico as an HTTP endpoint
+{
+  "servers": [...],
+  "listen": {
+    "type": "sse",
+    "port": 3000
+  }
+}
+```
 
 ### ServerConfig
 
@@ -163,7 +183,7 @@ Groups from different servers are merged if they share a prefix. Otherwise each 
 ```bash
 npm install
 npm run build    # TypeScript compilation
-npm test         # Run tests (77 tests, vitest)
+npm test         # Run tests (105 tests, vitest)
 npm run dev      # Run directly with tsx
 ```
 
