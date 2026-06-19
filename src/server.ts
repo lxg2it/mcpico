@@ -15,6 +15,8 @@ import { groupTools, type ToolGroup } from "./grouper.js";
 import { parseCommand } from "./parser.js";
 import { generateHelpText } from "./help.js";
 import { forwardToolCall } from "./proxy.js";
+import type { ResolvedListenAuth } from "./auth-types.js";
+import { resolveUpstreamAuth, resolveListenAuth, extractBearerToken, validateBearerToken, sendUnauthorized } from "./auth.js";
 
 /** Helper: create a simple text content result */
 export function textResult(text: string): CallToolResult {
@@ -168,10 +170,14 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
           ? serverConfig.transport.url
           : serverConfig.transport.command;
       console.error(`  Connecting to "${serverConfig.name}" (${serverConfig.transport.type}: ${transportLabel})...`);
+      const resolvedAuth = serverConfig.auth
+        ? resolveUpstreamAuth(serverConfig.auth)
+        : undefined;
       const discovered = await discoverServer(
         serverConfig.name,
         serverConfig.transport,
-        serverConfig.connectTimeoutMs
+        serverConfig.connectTimeoutMs,
+        resolvedAuth
       );
       servers.push(discovered);
 
@@ -205,7 +211,7 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
 
   // Create the MCPico server
   const server = new McpServer(
-    { name: "MCPico", version: "0.1.0" },
+    { name: "MCPico", version: "0.2.0" },
     {
       capabilities: { tools: {}, resources: {}, prompts: {} },
       instructions:
@@ -326,8 +332,23 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
   const listenConfig = config.listen || { type: "stdio" };
 
   if (listenConfig.type === "sse") {
+    // Resolve listen auth
+    let listenAuth: ResolvedListenAuth | undefined;
+    if (listenConfig.auth) {
+      listenAuth = resolveListenAuth(listenConfig.auth);
+    }
+
     const transport = new StreamableHTTPServerTransport();
     const httpServer = createServer(async (req, res) => {
+      // Auth check
+      if (listenAuth) {
+        const providedToken = extractBearerToken(req);
+        if (!validateBearerToken(providedToken, listenAuth.token)) {
+          sendUnauthorized(res);
+          return;
+        }
+      }
+
       // Collect body for handleRequest
       const chunks: Buffer[] = [];
       for await (const chunk of req) {

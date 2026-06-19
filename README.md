@@ -28,6 +28,8 @@ Group related tools under a single entry point. The model sees 9 groups instead 
 - **Dual listen transport** — MCPico itself listens via stdio or HTTP/SSE (configurable port)
 - **Configurable timeouts** — Per-server connection timeout with sensible default (30s)
 - **Resource & prompt passthrough** — Namespaced to avoid collisions across servers
+- **Authentication** — Bearer, custom header, and OAuth2 client_credentials with automatic token refresh
+- **Listen endpoint auth** — Protect the SSE endpoint with bearer token validation
 
 ## Usage
 
@@ -178,12 +180,111 @@ Groups from different servers are merged if they share a prefix. Otherwise each 
 | `type` | `"sse"` | yes | Transport type |
 | `url` | `string` | yes | Full URL to MCP Streamable HTTP endpoint |
 
+## Authentication
+
+MCPico supports two layers of authentication:
+
+### Layer 1: Protecting the listen endpoint
+
+When MCPico exposes an SSE endpoint, you can require a bearer token from clients:
+
+```json
+{
+  "servers": [...],
+  "listen": {
+    "type": "sse",
+    "port": 3000,
+    "auth": {
+      "type": "bearer",
+      "token": "${MCPICO_API_KEY}"
+    }
+  }
+}
+```
+
+Clients must include `Authorization: Bearer <token>` in requests. Invalid or missing tokens receive a 401 response.
+
+### Layer 2: Authenticating to upstream servers
+
+Upstream servers can require authentication. MCPico supports three methods:
+
+**Bearer token** — standard `Authorization: Bearer <token>` header:
+
+```json
+{
+  "servers": [
+    {
+      "name": "internal-api",
+      "transport": {
+        "type": "sse",
+        "url": "https://api.internal/mcp"
+      },
+      "auth": {
+        "type": "bearer",
+        "token": "${INTERNAL_KEY}"
+      }
+    }
+  ]
+}
+```
+
+**Custom header** — arbitrary headers (e.g. `X-API-Key`):
+
+```json
+{
+  "auth": {
+    "type": "header",
+    "name": "X-API-Key",
+    "value": "${WIDGET_KEY}"
+  }
+}
+```
+
+**OAuth 2.0 client credentials** — machine-to-machine authentication with automatic token refresh:
+
+```json
+{
+  "auth": {
+    "type": "oauth",
+    "grant_type": "client_credentials",
+    "client_id": "${PROVIDER_CLIENT_ID}",
+    "client_secret": "${PROVIDER_CLIENT_SECRET}",
+    "token_url": "https://auth.example.com/oauth/token",
+    "scopes": ["read", "write"]
+  }
+}
+```
+
+MCPico handles the full OAuth flow:
+- Fetches initial access token on startup
+- Caches tokens in `~/.mcplico/credentials.json`
+- Automatically refreshes before expiry
+- Retries on 401 with fresh tokens
+
+All auth fields support `${ENV_VAR}` interpolation — never hardcode secrets.
+
+### Auth config reference
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `auth.type` | `"bearer"` \| `"header"` \| `"oauth"` | yes | Auth method |
+| `auth.token` | `string` | for `bearer` | Bearer token value |
+| `auth.name` | `string` | for `header` | Header name |
+| `auth.value` | `string` | for `header` | Header value |
+| `auth.grant_type` | `"client_credentials"` | for `oauth` | OAuth grant type |
+| `auth.client_id` | `string` | for `oauth` | OAuth client ID |
+| `auth.client_secret` | `string` | for `oauth` | OAuth client secret |
+| `auth.token_url` | `string` | for `oauth` | Token endpoint URL |
+| `auth.scopes` | `string[]` | no | OAuth scopes to request |
+| `auth.authorization_server_url` | `string` | no | Auth server URL (if different from token_url issuer) |
+
+## Development
 ## Development
 
 ```bash
 npm install
 npm run build    # TypeScript compilation
-npm test         # Run tests (105 tests, vitest)
+npm test         # Run tests (138 tests, vitest)
 npm run dev      # Run directly with tsx
 ```
 

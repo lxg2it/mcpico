@@ -24,7 +24,7 @@ async function main(): Promise<void> {
       configPath = args[i + 1] || configPath;
       i++;
     } else if (args[i] === "--version" || args[i] === "-v") {
-      console.log("MCPico v0.1.0");
+      console.log("MCPico v0.2.0");
       process.exit(0);
     } else if (args[i] === "--help" || args[i] === "-h") {
       console.log(`

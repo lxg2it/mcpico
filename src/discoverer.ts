@@ -2,6 +2,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { TransportConfig } from "./config.js";
+import type { ResolvedUpstreamAuth } from "./auth-types.js";
+import { upstreamAuthHeaders } from "./auth.js";
+import { createClientCredentialsProvider } from "./oauth-provider.js";
 
 /**
  * Tool metadata from an upstream MCP server.
@@ -51,7 +54,8 @@ export interface DiscoveredServer {
 export async function discoverServer(
   name: string,
   transportConfig: TransportConfig,
-  connectTimeoutMs: number = 30_000
+  connectTimeoutMs: number = 30_000,
+  auth?: ResolvedUpstreamAuth
 ): Promise<DiscoveredServer> {
   let transport;
 
@@ -63,15 +67,31 @@ export async function discoverServer(
       cwd: transportConfig.cwd,
     });
   } else if (transportConfig.type === "sse") {
-    transport = new StreamableHTTPClientTransport(
-      new URL(transportConfig.url)
-    );
+    const url = new URL(transportConfig.url);
+    const opts: {
+      requestInit?: { headers: Record<string, string> };
+      authProvider?: ReturnType<typeof createClientCredentialsProvider>;
+    } = {};
+
+    if (auth) {
+      if (auth.type === "oauth") {
+        opts.authProvider = createClientCredentialsProvider(
+          auth.client_id,
+          auth.client_secret,
+          transportConfig.url
+        );
+      } else {
+        opts.requestInit = { headers: upstreamAuthHeaders(auth) };
+      }
+    }
+
+    transport = new StreamableHTTPClientTransport(url, opts);
   } else {
     throw new Error(`Unsupported transport type: ${(transportConfig as TransportConfig).type}`);
   }
 
   const client = new Client(
-    { name: `MCPico-${name}`, version: "0.1.0" },
+    { name: `MCPico-${name}`, version: "0.2.0" },
     { capabilities: {} }
   );
 

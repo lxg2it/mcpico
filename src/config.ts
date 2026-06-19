@@ -1,6 +1,9 @@
 /**
  * Transport configuration for connecting to an upstream MCP server.
  */
+import type { UpstreamAuth, ListenAuth } from "./auth-types.js";
+
+
 export type TransportConfig =
   | {
       type: "stdio";
@@ -25,6 +28,8 @@ export interface ServerConfig {
   transport: TransportConfig;
   /** Connection timeout in milliseconds (default: 30000) */
   connectTimeoutMs?: number;
+  /** Authentication config for this upstream server */
+  auth?: UpstreamAuth;
 }
 
 /**
@@ -39,7 +44,7 @@ export interface GroupOverrides {
  */
 export type ListenConfig =
   | { type: "stdio" }
-  | { type: "sse"; port: number; host?: string };
+  | { type: "sse"; port: number; host?: string; auth?: ListenAuth };
 
 /**
  * Full MCPico configuration.
