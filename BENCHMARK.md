@@ -9,8 +9,8 @@ We define 3 realistic tasks across 5 MCP servers (filesystem, PostgreSQL, Slack,
 | Mode | Description | Tools exposed |
 |---|---|---|
 | **Flat** | Traditional MCP — all 45 tools exposed directly | 45 tools with full schemas |
-| **Merged** | Current MCPico design — one group tool per server, `command` field doubles as help + execution | 5 group tools |
-| **Split** | Improved design — separate `help_<group>` discovery + `<group>` execution tools | 5 help + 5 exec = 10 tools |
+| **Merged (v0.2.0)** | Old MCPico design — one group tool per server, `command` field doubles as help + execution | 5 group tools |
+| **Split (v0.3.0)** | Current MCPico design — separate `help_<group>` discovery + `<group>` execution tools | 5 help + 5 exec = 10 tools |
 
 Three tasks spanning different complexity levels:
 
@@ -42,13 +42,13 @@ Measured: task success rate, total tokens consumed, number of tool calls.
 
 ## Key Findings
 
-### 1. Merged mode is broken for LLMs
-The `command` field approach (one field for both help and execution) fails on **100% of tasks** across both models. Models cannot reliably distinguish between discovery and execution when they share the same interface. The 35B model simply gives up and answers textually (0 tool calls on single and fs-complex). The 9B model calls tools but never correctly navigates the command format.
+### 1. Merged mode (v0.2.0) was broken for LLMs
+The `command` field approach (one field for both help and execution) failed on **100% of tasks** across both models. Models couldn't reliably distinguish between discovery and execution when they shared the same interface. This finding drove the v0.3.0 redesign.
 
-**Verdict: Do not use the merged `command` field approach for LLM tool interfaces.**
+**Verdict: Merged `command` field approach is unworkable — split discovery and execution.**
 
-### 2. Split mode matches flat success rate
-The split design (separate `help_<group>` + `<group>` tools) achieves the same 2/3 success rate as flat mode on both models. Models naturally use `help_postgres` to discover, then `postgres_query` to execute.
+### 2. Split mode (v0.3.0, current) matches flat success rate
+The current split design (separate `help_<group>` + `<group>` tools) achieves the same 2/3 success rate as flat mode on both models. Models naturally use `help_postgres` to discover, then `postgres_query` to execute.
 
 ### 3. Token savings are significant on smaller models
 The 9B model saves 60% tokens with the split design (14,027t vs 34,760t). The flat prompt is heavy because all 45 tool schemas are loaded into every request. The split design only loads tool schemas when the model explicitly requests help.
