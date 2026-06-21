@@ -1,8 +1,8 @@
 # MCPico
 
-**MCP proxy that bundles flat tool lists into hierarchical subcommand groups.**
+**MCP proxy that bundles flat tool lists into hierarchical groups with separate discovery and execution.**
 
-MCPico (MCP + "ico" = tiny) wraps upstream MCP servers, grouping their tools into discoverable subcommand-based tools. One tool per group, not one per tool. The `help` subcommand auto-generates rich documentation from upstream schemas.
+MCPico (MCP + "ico" = tiny) wraps upstream MCP servers, grouping their tools into discoverable groups. Each group gets a `help_<group>` discovery tool (auto-generated docs from upstream schemas) and a `<group>` execution tool. LLM benchmarks show 43–60% fewer conversation tokens while matching flat tool success rates.
 
 ## The Problem
 
@@ -12,17 +12,27 @@ Some clients add "tool search" as a workaround. But searching requires the model
 
 ## MCPico's Solution
 
-Group related tools under a single entry point. The model sees 9 groups instead of 14 tools. Discovery is built-in via `help`:
+Group related tools under a single entry point. The model sees groups instead of raw tools. Discovery is separated from execution:
 
 ```
-→ filesystem tools:
-  14 tools → 9 groups: read, write, edit, create, list, directory, move, search, get
+Model calls: help_postgres → sees available tools
+Model calls: postgres_query {"sql":"SELECT ..."} → executes
 ```
+
+### Quantified: 43–60% fewer conversation tokens
+
+See **[BENCHMARK.md](BENCHMARK.md)** for a full LLM evaluation comparing flat tools (45 tools, 5 servers), MCPico merged mode, and MCPico split mode across Qwen3.5-9B and Qwen3.6-35B.
+
+Key results:
+- **MCPico split** matches flat tool success rates on both models (2/3 tasks)
+- **60% token reduction** on 9B model (14,027 vs 34,760 tokens across all tasks)
+- **43% token reduction** on single-tool tasks with the 35B model
 
 ## Features
 
-- **Tool bundling** — Groups tools by prefix (configurable separator), collapsing flat tool lists
-- **Auto-generated help** — Each group's `help` subcommand is built from upstream tool schemas
+- **Tool bundling** — Groups tools by prefix (configurable separator), collapsing flat tool lists into 10 tools instead of 45+
+- **Split discovery/execution** — Separate `help_<group>` tools for discovery, `<group>` tools for execution. LLM-optimized design
+- **Auto-generated help** — `help_<group>` tools dynamically generate rich documentation from upstream schemas
 - **Multi-server aggregation** — Proxy multiple upstream MCP servers through one interface
 - **Dual upstream transport** — Supports both stdio and Streamable HTTP (SSE) upstream servers
 - **Dual listen transport** — MCPico itself listens via stdio or HTTP/SSE (configurable port)
@@ -85,20 +95,18 @@ Add MCPico as a server in your MCP client config:
 2. **Discover** their tools (`tools/list`)
 3. **Group** tools by prefix (configurable separator, default `_`)
    - `filesystem_read_file`, `filesystem_write_file` → group `filesystem`
-4. **Register** each group as a single MCP tool with a `command` string argument
-5. **Forward** tool calls by parsing `<subcommand> {"key":"value"}` and proxying to upstream
+4. **Register** two tools per group:
+   - `help_<group>` — discovery: lists all subcommands with their parameters
+   - `<group>` — execution: takes `subcommand` + `params`, forwards to upstream
+5. **Forward** tool calls directly to the matching upstream server
 6. **Generate help** dynamically from original tool schemas
 
-### Command format
+### Tool interface
 
 ```
-<subcommand> {"arg1":"val1","arg2":"val2"}
+help_postgres          ← call with no arguments to discover
+postgres               ← call with subcommand: "postgres_query", params: {sql: "..."}
 ```
-
-Examples:
-- `help` — see all subcommands and their parameters
-- `read_file {"path":"/tmp/hello.txt"}` — call a specific tool
-- `write_file {"path":"/tmp/out.txt","content":"hello"}` — with arguments
 
 ### Multi-server aggregation
 
