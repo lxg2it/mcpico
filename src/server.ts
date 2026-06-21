@@ -49,12 +49,59 @@ export function mergeGroups(allGroups: ToolGroup[]): Map<string, ToolGroup> {
 }
 
 /**
- * Handle a tool call command for a given group.
+ * Execute a known subcommand against an upstream server.
  *
- * Dispatches: help → error → unknown subcommand → forward to upstream server.
+ * Resolves the server, validates the tool exists in the group,
+ * and forwards the call. Used by both the legacy command-based
+ * handler and the split help/execute design.
  *
- * Exported for testing; allows injecting a mock forwardFn to avoid
- * connecting to real upstream servers.
+ * Exported for testing; allows injecting a mock forwardFn.
+ */
+export async function executeSubcommand(
+  subcommand: string,
+  args: Record<string, unknown>,
+  group: ToolGroup,
+  servers: DiscoveredServer[],
+  forwardFn: (
+    server: DiscoveredServer,
+    toolName: string,
+    args: Record<string, unknown>
+  ) => Promise<CallToolResult> = forwardToolCall
+): Promise<CallToolResult> {
+  const upstreamTool = group.tools.find((t) => t.name === subcommand);
+  if (!upstreamTool) {
+    const available = group.tools.map((t) => t.name).join(", ");
+    return textResult(
+      `Unknown subcommand: "${subcommand}"\n\nAvailable in ${group.groupName}: ${available}\n\nUse 'help_${group.groupName}' to see full documentation.`
+    );
+  }
+
+  const serverForTool = servers.find((s) =>
+    s.tools.some((t) => t.name === subcommand)
+  );
+
+  if (!serverForTool) {
+    return textResult(
+      `Internal error: could not find upstream server for tool "${subcommand}"`
+    );
+  }
+
+  try {
+    const result = await forwardFn(serverForTool, subcommand, args);
+    return result;
+  } catch (err) {
+    return textResult(
+      `Error calling "${subcommand}": ${(err as Error).message}`
+    );
+  }
+}
+
+/**
+ * Handle a tool call command for a given group (legacy merged mode).
+ *
+ * Parses a command string like 'help' or 'subcommand {"key":"value"}'
+ * and dispatches to executeSubcommand. Retained for backward compatibility
+ * and testing.
  */
 export async function handleToolCall(
   command: string,
@@ -77,46 +124,32 @@ export async function handleToolCall(
     return textResult(parsed.error);
   }
 
-  const toolName = parsed.subcommand!;
-  const upstreamTool = group.tools.find((t) => t.name === toolName);
-  if (!upstreamTool) {
-    const available = group.tools.map((t) => t.name).join(", ");
-    return textResult(
-      `Unknown subcommand: "${toolName}"\n\nAvailable in ${group.groupName}: ${available}\n\nUse 'help' for full documentation.`
-    );
-  }
-
-  const serverForTool = servers.find((s) =>
-    s.tools.some((t) => t.name === toolName)
-  );
-
-  if (!serverForTool) {
-    return textResult(
-      `Internal error: could not find upstream server for tool "${toolName}"`
-    );
-  }
-
-  try {
-    const result = await forwardFn(serverForTool, toolName, parsed.args);
-    return result;
-  } catch (err) {
-    return textResult(
-      `Error calling "${toolName}": ${(err as Error).message}`
-    );
-  }
+  return executeSubcommand(parsed.subcommand!, parsed.args, group, servers, forwardFn);
 }
 
 /**
- * Build the description string for a tool group.
+ * Build the description string for a help_<group> discovery tool.
+ */
+export function buildHelpDescription(group: ToolGroup): string {
+  const toolCount = group.tools.length;
+  return [
+    `List all ${group.groupName} subcommands (${toolCount} available) with their parameters.`,
+    `Call help_${group.groupName} first, then use the '${group.groupName}' tool to execute.`,
+  ].join(" ");
+}
+
+/**
+ * Build the description string for an execution group tool.
  */
 export function buildGroupDescription(group: ToolGroup): string {
   const toolCount = group.tools.length;
+  const subcommands = group.tools.map((t) => t.name.replace(`${group.groupName}_`, "")).slice(0, 5).join(", ");
+  const show = toolCount > 5 ? subcommands + ",..." : subcommands;
   return [
-    `MCPico ${group.groupName} — ${toolCount} tool${toolCount === 1 ? "" : "s"}`,
-    `Source: ${group.serverName}`,
-    `Use 'help' to see all subcommands and their parameters.`,
-    `Format: <subcommand> {"key":"value",...}`,
-  ].join(" | ");
+    `Execute ${group.groupName} operations. Call help_${group.groupName} first to discover subcommands.`,
+    `Set subcommand to "${group.groupName}_<operation>" with params.`,
+    `Available: ${show} (${toolCount} total)`,
+  ].join(" ");
 }
 
 /**
@@ -216,38 +249,60 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
       capabilities: { tools: {}, resources: {}, prompts: {} },
       instructions:
         "MCPico bundles upstream MCP tools into hierarchical groups. " +
-        "Use 'help' on any group to discover available subcommands. " +
-        'Format: <subcommand> {"key":"value",...}',
+        "Each group has two tools: help_<group> (discovery) and <group> (execution). " +
+        "Call help_<group> first to see available subcommands and their parameters, " +
+        "then call <group> with subcommand='<group>_<operation>' and params={...}.",
     }
   );
 
-  // Register each group as a tool
+  // Register each group as two tools: help_<group> + <group>
   for (const [groupName, group] of mergedGroups) {
     const toolCount = group.tools.length;
-    const description = buildGroupDescription(group);
-
     const helpText = generateHelpText(group);
 
+    // Discovery tool: help_<group>
+    server.registerTool(
+      `help_${groupName}`,
+      {
+        title: `MCPico: help_${groupName}`,
+        description: buildHelpDescription(group),
+        inputSchema: {},
+      },
+      async () => {
+        return textResult(helpText);
+      }
+    );
+
+    // Execution tool: <group>
     server.registerTool(
       groupName,
       {
         title: `MCPico: ${groupName}`,
-        description,
+        description: buildGroupDescription(group),
         inputSchema: {
-          command: z
+          subcommand: z
             .string()
             .describe(
-              `Use 'help' for full docs or '<subcommand> {"key":"value",...}' to execute. ` +
+              `The ${groupName} operation to run, e.g. "${groupName}_read_file" or "${groupName}_query". ` +
                 `${toolCount} subcommand${toolCount === 1 ? "" : "s"} available.`
             ),
+          params: z
+            .record(z.string(), z.unknown())
+            .optional()
+            .describe("Parameters to pass to the subcommand as key-value pairs"),
         },
       },
-      async (args: { command: string }) => {
-        return handleToolCall(args.command, group, servers, helpText);
+      async (args: { subcommand: string; params?: Record<string, unknown> }) => {
+        return executeSubcommand(
+          args.subcommand,
+          args.params || {},
+          group,
+          servers
+        );
       }
     );
 
-    console.error(`  Registered group: ${groupName} (${toolCount} tools)`);
+    console.error(`  Registered: help_${groupName} + ${groupName} (${toolCount} tools)`);
   }
 
   // Pass through resources from all upstream servers

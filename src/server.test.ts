@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { textResult, mergeGroups, handleToolCall, validateAllServerConfigs, buildGroupDescription } from "./server.js";
+import { textResult, mergeGroups, handleToolCall, executeSubcommand, validateAllServerConfigs, buildGroupDescription, buildHelpDescription } from "./server.js";
 import type { ToolGroup } from "./grouper.js";
 import type { DiscoveredServer, UpstreamTool } from "./discoverer.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -150,34 +150,75 @@ describe("validateAllServerConfigs", () => {
   });
 });
 
-describe("buildGroupDescription", () => {
-  it("includes group name", () => {
-    const desc = buildGroupDescription(makeGroup({ groupName: "filesystem" }));
-    expect(desc).toContain("MCPico filesystem");
+describe("buildHelpDescription", () => {
+  it("includes subcommand count", () => {
+    const desc = buildHelpDescription(makeGroup({ groupName: "fs" }));
+    expect(desc).toContain("fs subcommands");
+    expect(desc).toContain("1 available");
   });
 
-  it("shows singular for 1 tool", () => {
-    const desc = buildGroupDescription(makeGroup());
-    expect(desc).toContain("1 tool");
+  it("references the help tool name", () => {
+    const desc = buildHelpDescription(makeGroup({ groupName: "database" }));
+    expect(desc).toContain("help_database");
   });
 
-  it("shows plural for multiple tools", () => {
+  it("directs to the execution tool", () => {
+    const desc = buildHelpDescription(makeGroup({ groupName: "redis" }));
+    expect(desc).toContain("'redis' tool");
+  });
+
+  it("shows correct count for multi-tool groups", () => {
     const group = makeGroup({
-      tools: [makeTool({ name: "a" }), makeTool({ name: "b" })],
+      groupName: "fs",
+      tools: [makeTool({ name: "a" }), makeTool({ name: "b" }), makeTool({ name: "c" })],
+    });
+    const desc = buildHelpDescription(group);
+    expect(desc).toContain("3 available");
+  });
+});
+
+describe("buildGroupDescription", () => {
+  it("includes group name and subcommand format", () => {
+    const desc = buildGroupDescription(makeGroup({ groupName: "filesystem" }));
+    expect(desc).toContain("filesystem operations");
+    expect(desc).toContain("filesystem_<operation>");
+  });
+
+  it("shows correct tool count", () => {
+    const desc = buildGroupDescription(makeGroup());
+    expect(desc).toContain("(1 total)");
+  });
+
+  it("lists available subcommands for multiple tools", () => {
+    const group = makeGroup({
+      groupName: "db",
+      tools: [makeTool({ name: "db_query" }), makeTool({ name: "db_insert" })],
     });
     const desc = buildGroupDescription(group);
-    expect(desc).toContain("2 tools");
+    expect(desc).toContain("query, insert");
+    expect(desc).toContain("(2 total)");
   });
 
-  it("includes server name", () => {
-    const desc = buildGroupDescription(makeGroup({ serverName: "my-upstream" }));
-    expect(desc).toContain("Source: my-upstream");
+  it("truncates long subcommand lists with ellipsis", () => {
+    const group = makeGroup({
+      groupName: "fs",
+      tools: [
+        makeTool({ name: "fs_read" }),
+        makeTool({ name: "fs_write" }),
+        makeTool({ name: "fs_list" }),
+        makeTool({ name: "fs_delete" }),
+        makeTool({ name: "fs_search" }),
+        makeTool({ name: "fs_copy" }),
+      ],
+    });
+    const desc = buildGroupDescription(group);
+    expect(desc).toContain("...");
+    expect(desc).toContain("(6 total)");
   });
 
-  it("includes usage hints", () => {
-    const desc = buildGroupDescription(makeGroup());
-    expect(desc).toContain("Use 'help'");
-    expect(desc).toContain("<subcommand>");
+  it("references the help tool", () => {
+    const desc = buildGroupDescription(makeGroup({ groupName: "slack" }));
+    expect(desc).toContain("help_slack");
   });
 });
 
@@ -224,7 +265,7 @@ describe("handleToolCall", () => {
     expect(result.content?.[0]).toBeDefined();
     if (result.content?.[0] && "text" in result.content[0]) {
       expect(result.content[0].text).toContain('Unknown subcommand: "nonexistent"');
-      expect(result.content[0].text).toContain("test_tool");
+      expect(result.content[0].text).toContain("Available in");
     }
   });
 
@@ -296,6 +337,58 @@ describe("handleToolCall", () => {
       expect(result.content[0].text).toContain("Connection lost");
     }
   });
+
+describe("executeSubcommand", () => {
+  const servers = [makeServer()];
+  const group = makeGroup();
+
+  it("forwards to upstream for valid subcommand", async () => {
+    const forwardFn = vi.fn().mockResolvedValue(makeTextResult("ok"));
+    const result = await executeSubcommand("test_tool", { key: "val" }, group, servers, forwardFn);
+    expect(forwardFn).toHaveBeenCalledWith(servers[0], "test_tool", { key: "val" });
+    expect(result).toEqual(makeTextResult("ok"));
+  });
+
+  it("returns error for unknown subcommand", async () => {
+    const result = await executeSubcommand("nonexistent", {}, group, servers);
+    expect(result.content?.[0]).toBeDefined();
+    if (result.content?.[0] && "text" in result.content[0]) {
+      expect(result.content[0].text).toContain('Unknown subcommand: "nonexistent"');
+      expect(result.content[0].text).toContain("help_test_group");
+    }
+  });
+
+  it("returns internal error when server not found", async () => {
+    const orphanGroup = makeGroup({ tools: [makeTool({ name: "orphan" })] });
+    const result = await executeSubcommand("orphan", {}, orphanGroup, []);
+    expect(result.content?.[0]).toBeDefined();
+    if (result.content?.[0] && "text" in result.content[0]) {
+      expect(result.content[0].text).toContain("Internal error");
+    }
+  });
+
+  it("handles forward errors", async () => {
+    const forwardFn = vi.fn().mockRejectedValue(new Error("crash"));
+    const result = await executeSubcommand("test_tool", {}, group, servers, forwardFn);
+    if (result.content?.[0] && "text" in result.content[0]) {
+      expect(result.content[0].text).toContain("Error calling");
+      expect(result.content[0].text).toContain("crash");
+    }
+  });
+
+  it("finds correct server among multiple", async () => {
+    const serverA = makeServer({ name: "a", tools: [makeTool({ name: "tool_a" })] });
+    const serverB = makeServer({ name: "b", tools: [makeTool({ name: "tool_b" })] });
+    const multiGroup = makeGroup({
+      groupName: "multi",
+      tools: [makeTool({ name: "tool_a" }), makeTool({ name: "tool_b" })],
+    });
+    const forwardFn = vi.fn().mockResolvedValue(makeTextResult("ok"));
+    await executeSubcommand("tool_b", {}, multiGroup, [serverA, serverB], forwardFn);
+    expect(forwardFn).toHaveBeenCalledWith(serverB, "tool_b", {});
+  });
+});
+
 
   it("finds correct server when multiple servers exist", async () => {
     const serverA = makeServer({
