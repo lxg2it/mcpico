@@ -11,7 +11,7 @@ let listPromptsRejects = true;
 let listPromptsResult = { prompts: [] };
 
 // Mock the MCP SDK modules
-vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
+vi.mock("@modelcontextprotocol/client", () => ({
   Client: class {
     connect = mockConnect;
     close = mockClose;
@@ -30,16 +30,16 @@ vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
     readResource = vi.fn().mockResolvedValue({ contents: [] });
     getPrompt = vi.fn().mockResolvedValue({ messages: [] });
   },
-}));
-
-vi.mock("@modelcontextprotocol/sdk/client/stdio.js", () => ({
-  StdioClientTransport: class {
+  // v2 exports Client and StreamableHTTPClientTransport from the SAME entry point.
+  // They must share one registration: a second vi.mock() on the same path replaces
+  // the first rather than merging with it, which silently drops Client.
+  StreamableHTTPClientTransport: class {
     constructor(..._args: unknown[]) {}
   },
 }));
 
-vi.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
-  StreamableHTTPClientTransport: class {
+vi.mock("@modelcontextprotocol/client/stdio", () => ({
+  StdioClientTransport: class {
     constructor(..._args: unknown[]) {}
   },
 }));

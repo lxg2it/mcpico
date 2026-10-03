@@ -5,14 +5,7 @@
  * StreamableHTTPClientTransport handles auth discovery, token exchange,
  * and refresh automatically.
  */
-import type {
-  OAuthClientProvider,
-} from "@modelcontextprotocol/sdk/client/auth.js";
-import type {
-  OAuthClientMetadata,
-  OAuthClientInformationMixed,
-  OAuthTokens,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { OAuthClientProvider, OAuthClientMetadata, OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/client";
 import { loadTokens, saveTokens, clearTokens } from "./token-store.js";
 
 /**

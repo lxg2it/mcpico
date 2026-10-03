@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { textResult, mergeGroups, handleToolCall, executeSubcommand, validateAllServerConfigs, buildGroupDescription, buildHelpDescription } from "./server.js";
 import type { ToolGroup } from "./grouper.js";
 import type { DiscoveredServer, UpstreamTool } from "./discoverer.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 
 function makeTool(overrides: Partial<UpstreamTool> = {}): UpstreamTool {
   return {

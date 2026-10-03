@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { OAuthTokens } from "@modelcontextprotocol/server";
 
 const CREDENTIALS_DIR = join(homedir(), ".mcplico");
 const CREDENTIALS_FILE = join(CREDENTIALS_DIR, "credentials.json");

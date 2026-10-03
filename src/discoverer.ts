@@ -1,6 +1,5 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { TransportConfig } from "./config.js";
 import type { ResolvedUpstreamAuth } from "./auth-types.js";
 import { upstreamAuthHeaders } from "./auth.js";

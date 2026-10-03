@@ -1,8 +1,8 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { McpServer } from "@modelcontextprotocol/server";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import { createServer } from "node:http";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod/v4";
 import type { MCPicoConfig } from "./config.js";
 import { validateServerConfig } from "./config.js";
@@ -266,7 +266,7 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
       {
         title: `MCPico: help_${groupName}`,
         description: buildHelpDescription(group),
-        inputSchema: {},
+        inputSchema: z.object({}),
       },
       async () => {
         return textResult(helpText);
@@ -279,7 +279,7 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
       {
         title: `MCPico: ${groupName}`,
         description: buildGroupDescription(group),
-        inputSchema: {
+        inputSchema: z.object({
           subcommand: z
             .string()
             .describe(
@@ -290,7 +290,7 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
             .record(z.string(), z.unknown())
             .optional()
             .describe("Parameters to pass to the subcommand as key-value pairs"),
-        },
+        }),
       },
       async (args: { subcommand: string; params?: Record<string, unknown> }) => {
         return executeSubcommand(
@@ -352,7 +352,7 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
           title: `${upstream.name}: ${prompt.name}`,
           description: `${prompt.description || ""} (from ${upstream.name})`,
           argsSchema:
-            Object.keys(argShape).length > 0 ? argShape : undefined,
+            Object.keys(argShape).length > 0 ? z.object(argShape) : undefined,
         },
         async (args) => {
           const promptArgs: Record<string, string> = {};
@@ -393,7 +393,7 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
       listenAuth = resolveListenAuth(listenConfig.auth);
     }
 
-    const transport = new StreamableHTTPServerTransport();
+    const transport = new NodeStreamableHTTPServerTransport();
     const httpServer = createServer(async (req, res) => {
       // Auth check
       if (listenAuth) {

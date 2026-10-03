@@ -33,7 +33,10 @@
     "url": "https://github.com/lxg2it/mcpico/issues"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.0"
+    "@modelcontextprotocol/client": "^2.3.0",
+    "@modelcontextprotocol/node": "^2.1.1",
+    "@modelcontextprotocol/server": "^2.3.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
