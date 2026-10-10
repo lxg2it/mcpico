@@ -8,8 +8,9 @@ import {
   resolveListenAuth,
   upstreamAuthHeaders,
   extractBearerToken,
+  extractBearerTokenFromHeader,
   validateBearerToken,
-  sendUnauthorized,
+  unauthorizedResponse,
 } from "./auth.js";
 import type {
   BearerAuth,
@@ -200,19 +201,38 @@ describe("validateBearerToken", () => {
   });
 });
 
-describe("sendUnauthorized", () => {
-  it("sends 401 with WWW-Authenticate header", () => {
-    const res = {
-      writeHead: vi.fn(),
-      end: vi.fn(),
-    } as any;
+describe("extractBearerTokenFromHeader", () => {
+  it("extracts the token from a Bearer header", () => {
+    expect(extractBearerTokenFromHeader("Bearer abc123")).toBe("abc123");
+  });
 
-    sendUnauthorized(res);
+  it("accepts any case of the scheme", () => {
+    expect(extractBearerTokenFromHeader("bearer abc123")).toBe("abc123");
+  });
 
-    expect(res.writeHead).toHaveBeenCalledWith(401, {
-      "Content-Type": "application/json",
-      "WWW-Authenticate": 'Bearer realm="mcplico"',
+  it("returns undefined for null — the absent header a fetch Request reports", () => {
+    expect(extractBearerTokenFromHeader(null)).toBeUndefined();
+  });
+
+  it("returns undefined for an empty header", () => {
+    expect(extractBearerTokenFromHeader("")).toBeUndefined();
+  });
+
+  it("returns undefined for a non-Bearer scheme", () => {
+    expect(extractBearerTokenFromHeader("Basic abc123")).toBeUndefined();
+  });
+});
+
+describe("unauthorizedResponse", () => {
+  it("is a 401 carrying a WWW-Authenticate challenge", async () => {
+    const res = unauthorizedResponse();
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+    expect(res.headers.get("WWW-Authenticate")).toBe('Bearer realm="MCPico"');
+    expect(await res.json()).toEqual({
+      error: "Unauthorized",
+      message: "Bearer token required",
     });
-    expect(res.end).toHaveBeenCalled();
   });
 });

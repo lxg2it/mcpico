@@ -1,8 +1,9 @@
-import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
+import { toNodeHandler } from "@modelcontextprotocol/node";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
-import { McpServer } from "@modelcontextprotocol/server";
-import type { CallToolResult } from "@modelcontextprotocol/server";
-import { createServer } from "node:http";
+import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import type { CallToolResult, McpHttpHandler } from "@modelcontextprotocol/server";
+import { createServer, type Server as HttpServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { z } from "zod/v4";
 import type { MCPicoConfig } from "./config.js";
 import { validateServerConfig } from "./config.js";
@@ -16,7 +17,7 @@ import { parseCommand } from "./parser.js";
 import { generateHelpText } from "./help.js";
 import { forwardToolCall } from "./proxy.js";
 import type { ResolvedListenAuth } from "./auth-types.js";
-import { resolveUpstreamAuth, resolveListenAuth, extractBearerToken, validateBearerToken, sendUnauthorized } from "./auth.js";
+import { resolveUpstreamAuth, resolveListenAuth, extractBearerTokenFromHeader, validateBearerToken, unauthorizedResponse } from "./auth.js";
 
 /** Helper: create a simple text content result */
 export function textResult(text: string): CallToolResult {
@@ -176,7 +177,171 @@ export function validateAllServerConfigs(servers: MCPicoConfig["servers"]): stri
  * 4. Register grouped tools on the MCPico server
  * 5. Listen for client connections
  */
-export async function startServer(config: MCPicoConfig): Promise<void> {
+export interface ServerContext {
+  mergedGroups: Map<string, ToolGroup>;
+  servers: DiscoveredServer[];
+}
+
+/**
+ * A running MCPico instance. Returned by startServer so callers — including
+ * tests — can tell where it is listening and stop it without exiting the
+ * process.
+ */
+export interface RunningServer {
+  /** Stop serving: disconnect upstreams, then close the client-facing side. */
+  close(): Promise<void>;
+  /** The bound HTTP address, or undefined when serving over stdio. */
+  address(): { host: string; port: number } | undefined;
+}
+
+
+/**
+ * Build one fully-registered MCPico server.
+ *
+ * HTTP serving is per-request in SDK v2: a server and transport serve exactly
+ * one connection, so a shared instance answers the first request and fails the
+ * next. This is a plain factory — every instance registers the same surface
+ * from the same shared context, reads nothing request-specific, and mutates
+ * nothing.
+ *
+ * Deliberately silent: it runs once per request, so the startup log lines
+ * belong to startServer.
+ */
+export function buildServer(context: ServerContext): McpServer {
+  const { mergedGroups, servers } = context;
+
+  const server = new McpServer(
+    { name: "MCPico", version: "0.2.0" },
+    {
+      capabilities: { tools: {}, resources: {}, prompts: {} },
+      instructions:
+        "MCPico bundles upstream MCP tools into hierarchical groups. " +
+        "Each group has two tools: help_<group> (discovery) and <group> (execution). " +
+        "Call help_<group> first to see available subcommands and their parameters, " +
+        "then call <group> with subcommand='<group>_<operation>' and params={...}.",
+    }
+  );
+
+  // Register each group as two tools: help_<group> + <group>
+  for (const [groupName, group] of mergedGroups) {
+    const toolCount = group.tools.length;
+    const helpText = generateHelpText(group);
+
+    // Discovery tool: help_<group>
+    server.registerTool(
+      `help_${groupName}`,
+      {
+        title: `MCPico: help_${groupName}`,
+        description: buildHelpDescription(group),
+        inputSchema: z.object({}),
+      },
+      async () => {
+        return textResult(helpText);
+      }
+    );
+
+    // Execution tool: <group>
+    server.registerTool(
+      groupName,
+      {
+        title: `MCPico: ${groupName}`,
+        description: buildGroupDescription(group),
+        inputSchema: z.object({
+          subcommand: z
+            .string()
+            .describe(
+              `The ${groupName} operation to run, e.g. "${groupName}_read_file" or "${groupName}_query". ` +
+                `${toolCount} subcommand${toolCount === 1 ? "" : "s"} available.`
+            ),
+          params: z
+            .record(z.string(), z.unknown())
+            .optional()
+            .describe("Parameters to pass to the subcommand as key-value pairs"),
+        }),
+      },
+      async (args: { subcommand: string; params?: Record<string, unknown> }) => {
+        return executeSubcommand(
+          args.subcommand,
+          args.params || {},
+          group,
+          servers
+        );
+      }
+    );
+
+  }
+
+  // Pass through resources from all upstream servers
+  for (const upstream of servers) {
+    for (const res of upstream.resources) {
+      const namespacedUri = `mcpico://${upstream.name}/${res.uri}`;
+      const displayName = `${upstream.name}: ${res.name}`;
+
+      server.registerResource(
+        displayName,
+        namespacedUri,
+        {
+          description: `${res.description || res.name} (from ${upstream.name})`,
+          mimeType: res.mimeType,
+        },
+        async () => {
+          const result = await upstream.client.readResource({ uri: res.uri });
+          return {
+            contents: result.contents || [],
+          };
+        }
+      );
+    }
+  }
+
+  // Pass through prompts from all upstream servers
+  for (const upstream of servers) {
+    for (const prompt of upstream.prompts) {
+      const namespacedName = `${upstream.name}_${prompt.name}`;
+
+      const argShape: Record<string, ReturnType<typeof z.string>> = {};
+      for (const arg of prompt.arguments || []) {
+        argShape[arg.name] = z
+          .string()
+          .describe(
+            arg.description ||
+              `Argument: ${arg.name}${arg.required ? " (required)" : ""}`
+          );
+      }
+
+      server.registerPrompt(
+        namespacedName,
+        {
+          title: `${upstream.name}: ${prompt.name}`,
+          description: `${prompt.description || ""} (from ${upstream.name})`,
+          argsSchema:
+            Object.keys(argShape).length > 0 ? z.object(argShape) : undefined,
+        },
+        async (args) => {
+          const promptArgs: Record<string, string> = {};
+          if (args && typeof args === "object") {
+            for (const [k, v] of Object.entries(
+              args as Record<string, unknown>
+            )) {
+              promptArgs[k] = String(v);
+            }
+          }
+          const result = await upstream.client.getPrompt({
+            name: prompt.name,
+            arguments: promptArgs,
+          });
+          return {
+            messages: result.messages || [],
+          };
+        }
+      );
+    }
+  }
+
+  return server;
+}
+
+export async function startServer(config: MCPicoConfig): Promise<RunningServer> {
   const separator = config.separator || "_";
   const servers: DiscoveredServer[] = [];
   const allGroups: ToolGroup[] = [];
@@ -242,149 +407,25 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
   // Build lookup: groupName → ToolGroup (merged across servers)
   const mergedGroups = mergeGroups(allGroups);
 
-  // Create the MCPico server
-  const server = new McpServer(
-    { name: "MCPico", version: "0.2.0" },
-    {
-      capabilities: { tools: {}, resources: {}, prompts: {} },
-      instructions:
-        "MCPico bundles upstream MCP tools into hierarchical groups. " +
-        "Each group has two tools: help_<group> (discovery) and <group> (execution). " +
-        "Call help_<group> first to see available subcommands and their parameters, " +
-        "then call <group> with subcommand='<group>_<operation>' and params={...}.",
-    }
-  );
+  const context: ServerContext = { mergedGroups, servers };
 
-  // Register each group as two tools: help_<group> + <group>
+  // Registration is per serving unit (see buildServer); report the shape once.
   for (const [groupName, group] of mergedGroups) {
-    const toolCount = group.tools.length;
-    const helpText = generateHelpText(group);
-
-    // Discovery tool: help_<group>
-    server.registerTool(
-      `help_${groupName}`,
-      {
-        title: `MCPico: help_${groupName}`,
-        description: buildHelpDescription(group),
-        inputSchema: z.object({}),
-      },
-      async () => {
-        return textResult(helpText);
-      }
-    );
-
-    // Execution tool: <group>
-    server.registerTool(
-      groupName,
-      {
-        title: `MCPico: ${groupName}`,
-        description: buildGroupDescription(group),
-        inputSchema: z.object({
-          subcommand: z
-            .string()
-            .describe(
-              `The ${groupName} operation to run, e.g. "${groupName}_read_file" or "${groupName}_query". ` +
-                `${toolCount} subcommand${toolCount === 1 ? "" : "s"} available.`
-            ),
-          params: z
-            .record(z.string(), z.unknown())
-            .optional()
-            .describe("Parameters to pass to the subcommand as key-value pairs"),
-        }),
-      },
-      async (args: { subcommand: string; params?: Record<string, unknown> }) => {
-        return executeSubcommand(
-          args.subcommand,
-          args.params || {},
-          group,
-          servers
-        );
-      }
-    );
-
-    console.error(`  Registered: help_${groupName} + ${groupName} (${toolCount} tools)`);
+    console.error(`  Registered: help_${groupName} + ${groupName} (${group.tools.length} tools)`);
   }
-
-  // Pass through resources from all upstream servers
-  let resourceCount = 0;
-  for (const upstream of servers) {
-    for (const res of upstream.resources) {
-      const namespacedUri = `mcpico://${upstream.name}/${res.uri}`;
-      const displayName = `${upstream.name}: ${res.name}`;
-
-      server.registerResource(
-        displayName,
-        namespacedUri,
-        {
-          description: `${res.description || res.name} (from ${upstream.name})`,
-          mimeType: res.mimeType,
-        },
-        async () => {
-          const result = await upstream.client.readResource({ uri: res.uri });
-          return {
-            contents: result.contents || [],
-          };
-        }
-      );
-      resourceCount++;
-    }
-  }
-
-  // Pass through prompts from all upstream servers
-  let promptCount = 0;
-  for (const upstream of servers) {
-    for (const prompt of upstream.prompts) {
-      const namespacedName = `${upstream.name}_${prompt.name}`;
-
-      const argShape: Record<string, ReturnType<typeof z.string>> = {};
-      for (const arg of prompt.arguments || []) {
-        argShape[arg.name] = z
-          .string()
-          .describe(
-            arg.description ||
-              `Argument: ${arg.name}${arg.required ? " (required)" : ""}`
-          );
-      }
-
-      server.registerPrompt(
-        namespacedName,
-        {
-          title: `${upstream.name}: ${prompt.name}`,
-          description: `${prompt.description || ""} (from ${upstream.name})`,
-          argsSchema:
-            Object.keys(argShape).length > 0 ? z.object(argShape) : undefined,
-        },
-        async (args) => {
-          const promptArgs: Record<string, string> = {};
-          if (args && typeof args === "object") {
-            for (const [k, v] of Object.entries(
-              args as Record<string, unknown>
-            )) {
-              promptArgs[k] = String(v);
-            }
-          }
-          const result = await upstream.client.getPrompt({
-            name: prompt.name,
-            arguments: promptArgs,
-          });
-          return {
-            messages: result.messages || [],
-          };
-        }
-      );
-      promptCount++;
-    }
-  }
-
+  const resourceCount = servers.reduce((n, s) => n + s.resources.length, 0);
+  const promptCount = servers.reduce((n, s) => n + s.prompts.length, 0);
   if (resourceCount > 0) {
     console.error(`  Registered ${resourceCount} resource(s)`);
   }
   if (promptCount > 0) {
     console.error(`  Registered ${promptCount} prompt(s)`);
   }
-
-  // Connect to client via configured transport
+  // Serve the client over the configured transport
   const listenConfig = config.listen || { type: "stdio" };
+  let httpServer: HttpServer | undefined;
+  let mcpHandler: McpHttpHandler | undefined;
+  let stdioServer: McpServer | undefined;
 
   if (listenConfig.type === "sse") {
     // Resolve listen auth
@@ -393,52 +434,88 @@ export async function startServer(config: MCPicoConfig): Promise<void> {
       listenAuth = resolveListenAuth(listenConfig.auth);
     }
 
-    const transport = new NodeStreamableHTTPServerTransport();
-    const httpServer = createServer(async (req, res) => {
-      // Auth check
-      if (listenAuth) {
-        const providedToken = extractBearerToken(req);
-        if (!validateBearerToken(providedToken, listenAuth.token)) {
-          sendUnauthorized(res);
-          return;
-        }
-      }
-
-      // Collect body for handleRequest
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) {
-        chunks.push(chunk);
-      }
-      const body = chunks.length > 0 ? Buffer.concat(chunks).toString() : undefined;
-      await transport.handleRequest(req, res, body);
+    // One handler for the endpoint. It classifies each exchange and asks the
+    // factory for a fresh instance, which is what v2 requires — a server and
+    // transport serve exactly one connection, so a shared instance answers the
+    // first request and fails the next. `legacy: "stateless"` keeps 2025-era
+    // clients (everything that exists today) working, one instance per request.
+    mcpHandler = createMcpHandler(() => buildServer(context), {
+      legacy: "stateless",
+      onerror: (error) => console.error("MCPico HTTP error:", error.message),
     });
-    await server.connect(transport);
+    const handler = mcpHandler;
+
+    // toNodeHandler builds a Web Request from the node request and lets the
+    // transport read the body. The stream must not be drained first: handing
+    // over an empty or already-consumed body answers 400 ("Parse error: Invalid
+    // JSON-RPC message") on every request, which is what this mode used to do.
+    const nodeHandler = toNodeHandler({
+      fetch: async (request, options) => {
+        // Auth check
+        if (listenAuth) {
+          const providedToken = extractBearerTokenFromHeader(
+            request.headers.get("authorization")
+          );
+          if (!validateBearerToken(providedToken, listenAuth.token)) {
+            return unauthorizedResponse();
+          }
+        }
+
+        return handler.fetch(request, options);
+      },
+    });
+
+    httpServer = createServer(nodeHandler);
     const host = listenConfig.host || "localhost";
-    httpServer.listen(listenConfig.port, host);
+    await new Promise<void>((resolve, reject) => {
+      httpServer!.once("error", reject);
+      httpServer!.listen(listenConfig.port, host, resolve);
+    });
+    const { port: boundPort } = httpServer.address() as AddressInfo;
     console.error(
-      `MCPico ready — ${mergedGroups.size} group(s), ${servers.length} upstream server(s) — listening on http://${host}:${listenConfig.port}`
+      `MCPico ready — ${mergedGroups.size} group(s), ${servers.length} upstream server(s) — listening on http://${host}:${boundPort}`
     );
   } else {
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
+    stdioServer = buildServer(context);
+    await stdioServer.connect(new StdioServerTransport());
     console.error(
       `MCPico ready — ${mergedGroups.size} group(s), ${servers.length} upstream server(s)`
     );
   }
 
-  // Handle shutdown
+  // Shut down cleanly: upstreams first, then whatever is serving the client.
   let shuttingDown = false;
-  const shutdown = async () => {
+  const close = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.error("Shutting down...");
     for (const s of servers) {
       await disconnectServer(s);
     }
-    await server.close();
-    process.exit(0);
+    if (mcpHandler) {
+      await mcpHandler.close();
+    }
+    if (stdioServer) {
+      await stdioServer.close();
+    }
+    if (httpServer) {
+      await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
+    }
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      void close().then(() => process.exit(0));
+    });
+  }
+
+  return {
+    close,
+    address: () => {
+      const addr = httpServer?.address();
+      return addr && typeof addr !== "string"
+        ? { host: addr.address, port: addr.port }
+        : undefined;
+    },
+  };
 }

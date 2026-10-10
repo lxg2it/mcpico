@@ -1,7 +1,7 @@
 /**
  * Auth utilities: env var resolution, header generation, listen token validation.
  */
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { IncomingMessage } from "node:http";
 import type {
   UpstreamAuth,
   ListenAuth,
@@ -107,11 +107,20 @@ export function upstreamAuthHeaders(
  * Extract bearer token from an Authorization header.
  * Returns undefined if no Bearer token found.
  */
-export function extractBearerToken(req: IncomingMessage): string | undefined {
-  const auth = req.headers.authorization;
-  if (!auth) return undefined;
-  const match = auth.match(/^Bearer\s+(.+)$/i);
+export function extractBearerTokenFromHeader(
+  header: string | null | undefined
+): string | undefined {
+  if (!header) return undefined;
+  const match = header.match(/^Bearer\s+(.+)$/i);
   return match ? match[1] : undefined;
+}
+
+/**
+ * Extract bearer token from an incoming node request.
+ * Returns undefined if no Bearer token found.
+ */
+export function extractBearerToken(req: IncomingMessage): string | undefined {
+  return extractBearerTokenFromHeader(req.headers.authorization);
 }
 
 /**
@@ -130,12 +139,21 @@ export function validateBearerToken(
 /**
  * Send a 401 Unauthorized response with a WWW-Authenticate header.
  */
-export function sendUnauthorized(res: ServerResponse): void {
-  res.writeHead(401, {
-    "Content-Type": "application/json",
-    "WWW-Authenticate": 'Bearer realm="mcplico"',
-  });
-  res.end(JSON.stringify({ error: "Unauthorized", message: "Bearer token required" }));
+/**
+ * Build a 401 Unauthorized response with a WWW-Authenticate header. Web
+ * standard shape, because the listen endpoint is served as a fetch handler.
+ */
+export function unauthorizedResponse(): Response {
+  return new Response(
+    JSON.stringify({ error: "Unauthorized", message: "Bearer token required" }),
+    {
+      status: 401,
+      headers: {
+        "Content-Type": "application/json",
+        "WWW-Authenticate": 'Bearer realm="MCPico"',
+      },
+    }
+  );
 }
 
 // ── Constant-time string comparison ──
